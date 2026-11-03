@@ -1,0 +1,11 @@
+# Build artifacts
+build/
+cmake-build-*/
+sdkconfig.old
+
+# IDE files
+.idea/
+
+# Temporary files
+*.swp
+*.tmp
