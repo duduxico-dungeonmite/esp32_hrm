@@ -8,7 +8,7 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_ili9341.h"
+#include "esp_lcd_panel_st7789.h"
 
 #define LCD_HOST       SPI2_HOST
 
@@ -16,7 +16,7 @@
 #define PIN_SCLK       GPIO_NUM_14
 #define PIN_CS         GPIO_NUM_15
 #define PIN_DC         GPIO_NUM_2
-#define PIN_BACKLIGHT  GPIO_NUM_21
+#define PIN_BACKLIGHT  GPIO_NUM_27
 
 #define LCD_WIDTH      240
 #define LCD_HEIGHT     320
@@ -77,7 +77,7 @@ static esp_lcd_panel_handle_t init_display()
     panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
     panel_config.bits_per_pixel = 16;
 
-    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(
         io_handle,
         &panel_config,
         &panel
@@ -88,6 +88,10 @@ static esp_lcd_panel_handle_t init_display()
 
     // Common CYD display configuration.
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
+
+    // Turn the display on.
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+
 
     return panel;
 }
