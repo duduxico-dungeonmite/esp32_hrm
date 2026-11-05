@@ -1,3 +1,4 @@
+
 // LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!!
 
 #include <stdint.h>
@@ -10,6 +11,10 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_st7789.h"
 
+#include "lvgl.h"
+#include "esp_lvgl_port.h"
+#include "esp_lvgl_port_disp.h"
+
 #define LCD_HOST       SPI2_HOST
 
 #define PIN_MOSI       GPIO_NUM_13
@@ -21,7 +26,15 @@
 #define LCD_WIDTH      240
 #define LCD_HEIGHT     320
 
-#define CHUNK_HEIGHT   16
+#define LVGL_BUFFER_HEIGHT  40
+
+// LCD handles shared with LVGL.
+static esp_lcd_panel_io_handle_t lcd_io = nullptr;
+static esp_lcd_panel_handle_t lcd_panel = nullptr;
+
+// --------------------------------------------------
+// BACKLIGHT
+// --------------------------------------------------
 
 static void init_backlight()
 {
@@ -30,12 +43,14 @@ static void init_backlight()
     config.mode = GPIO_MODE_OUTPUT;
 
     ESP_ERROR_CHECK(gpio_config(&config));
-    ESP_ERROR_CHECK(gpio_set_level(
-        static_cast<gpio_num_t>(PIN_BACKLIGHT), 1
-    ));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_BACKLIGHT, 1));
 }
 
-static esp_lcd_panel_handle_t init_display()
+// --------------------------------------------------
+// DISPLAY INITIALIZATION
+// --------------------------------------------------
+
+static void init_display()
 {
     // Configure SPI bus.
     spi_bus_config_t bus_config = {};
@@ -45,15 +60,13 @@ static esp_lcd_panel_handle_t init_display()
     bus_config.quadwp_io_num = -1;
     bus_config.quadhd_io_num = -1;
     bus_config.max_transfer_sz =
-        LCD_WIDTH * CHUNK_HEIGHT * sizeof(uint16_t);
+        LCD_WIDTH * LVGL_BUFFER_HEIGHT * sizeof(uint16_t);
 
     ESP_ERROR_CHECK(spi_bus_initialize(
         LCD_HOST, &bus_config, SPI_DMA_CH_AUTO
     ));
 
     // Configure LCD communication.
-    esp_lcd_panel_io_handle_t io_handle = nullptr;
-
     esp_lcd_panel_io_spi_config_t io_config = {};
     io_config.cs_gpio_num = PIN_CS;
     io_config.dc_gpio_num = PIN_DC;
@@ -66,78 +79,184 @@ static esp_lcd_panel_handle_t init_display()
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
         static_cast<esp_lcd_spi_bus_handle_t>(LCD_HOST),
         &io_config,
-        &io_handle
+        &lcd_io
     ));
 
-    // Create ILI9341 panel.
-    esp_lcd_panel_handle_t panel = nullptr;
-
+    // Create ST7789 panel.
     esp_lcd_panel_dev_config_t panel_config = {};
     panel_config.reset_gpio_num = GPIO_NUM_NC;
     panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
     panel_config.bits_per_pixel = 16;
 
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(
-        io_handle,
+        lcd_io,
         &panel_config,
-        &panel
+        &lcd_panel
     ));
 
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(lcd_panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(lcd_panel));
 
     // Common CYD display configuration.
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(lcd_panel, true));
 
-    // Turn the display on.
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-
-
-    return panel;
+    // Turn display on.
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd_panel, true));
 }
 
-static void draw_test_pattern(esp_lcd_panel_handle_t panel)
+// --------------------------------------------------
+// HRM USER INTERFACE
+// --------------------------------------------------
+
+static void create_hrm_ui()
 {
-    static uint16_t buffer[LCD_WIDTH * CHUNK_HEIGHT];
+    lv_obj_t *screen = lv_screen_active();
 
-    const uint16_t colors[] = {
-        0xF800, // Red
-        0x07E0, // Green
-        0x001F, // Blue
-        0xFFFF, // White
-        0x0000  // Black
-    };
+    // Catppuccin-inspired palette.
+    const lv_color_t bg      = lv_color_hex(0x1C1C1C);
+    const lv_color_t surface = lv_color_hex(0x1E1E2E);
+    const lv_color_t purple  = lv_color_hex(0x301934);
+    const lv_color_t green   = lv_color_hex(0x507963);
+    const lv_color_t yellow  = lv_color_hex(0xBA8E23);
+    const lv_color_t text    = lv_color_hex(0xCDD6F4);
+    const lv_color_t muted   = lv_color_hex(0x6C7086);
 
-    constexpr int band_height = LCD_HEIGHT / 5;
+    // Main background.
+    lv_obj_set_style_bg_color(screen, bg, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(screen, 12, 0);
+    lv_obj_set_style_border_width(screen, 0, 0);
 
-    for (int band = 0; band < 5; ++band) {
-        const uint16_t color = colors[band];
+    // ---------------- HEADER ----------------
 
-        for (auto &pixel : buffer) {
-            pixel = color;
-        }
+    lv_obj_t *title = lv_label_create(screen);
+    lv_label_set_text(title, "Core-X Mobile H.R.M");
+    lv_obj_set_style_text_color(title, purple, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
-        for (int y = band * band_height;
-             y < (band + 1) * band_height;
-             y += CHUNK_HEIGHT) {
+    lv_obj_t *status = lv_label_create(screen);
+    lv_label_set_text(status, "! SENSOR DESCONECTADO !");
+    lv_obj_set_style_text_color(status, yellow, 0);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
+    lv_obj_align(status, LV_ALIGN_TOP_LEFT, 0, 30);
 
-            ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(
-                panel,
-                0, y,
-                LCD_WIDTH, y + CHUNK_HEIGHT,
-                buffer
-            ));
-        }
+    // ---------------- BPM CARD ----------------
+
+    lv_obj_t *bpm_card = lv_obj_create(screen);
+    lv_obj_set_size(bpm_card, 216, 94);
+    lv_obj_align(bpm_card, LV_ALIGN_TOP_MID, 0, 58);
+
+    lv_obj_set_style_bg_color(bpm_card, surface, 0);
+    lv_obj_set_style_bg_opa(bpm_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bpm_card, 0, 0);
+    lv_obj_set_style_radius(bpm_card, 12, 0);
+    lv_obj_set_style_pad_all(bpm_card, 10, 0);
+
+    lv_obj_t *bpm_caption = lv_label_create(bpm_card);
+    lv_label_set_text(bpm_caption, "Freq. Cardiaca");
+    lv_obj_set_style_text_color(bpm_caption, muted, 0);
+    lv_obj_align(bpm_caption, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *bpm_value = lv_label_create(bpm_card);
+    lv_label_set_text(bpm_value, "--");
+    lv_obj_set_style_text_color(bpm_value, green, 0);
+    lv_obj_set_style_text_font(bpm_value, &lv_font_montserrat_48, 0);
+    lv_obj_align(bpm_value, LV_ALIGN_CENTER, -12, 8);
+
+    lv_obj_t *bpm_unit = lv_label_create(bpm_card);
+    lv_label_set_text(bpm_unit, "BPM");
+    lv_obj_set_style_text_color(bpm_unit, text, 0);
+    lv_obj_set_style_text_font(bpm_unit, &lv_font_montserrat_12, 0);
+    lv_obj_align(bpm_unit, LV_ALIGN_RIGHT_MID, -12, 12);
+
+    // ---------------- ECG CARD ----------------
+
+    lv_obj_t *ecg_card = lv_obj_create(screen);
+    lv_obj_set_size(ecg_card, 216, 105);
+    lv_obj_align(ecg_card, LV_ALIGN_TOP_MID, 0, 164);
+
+    lv_obj_set_style_bg_color(ecg_card, surface, 0);
+    lv_obj_set_style_bg_opa(ecg_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(ecg_card, 0, 0);
+    lv_obj_set_style_radius(ecg_card, 12, 0);
+    lv_obj_set_style_pad_all(ecg_card, 10, 0);
+
+    lv_obj_t *ecg_title = lv_label_create(ecg_card);
+    lv_label_set_text(ecg_title, "SINAL EGC");
+    lv_obj_set_style_text_color(ecg_title, purple, 0);
+    lv_obj_align(ecg_title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lv_obj_t *ecg_wait = lv_label_create(ecg_card);
+    lv_label_set_text(ecg_wait, "Esperando sinal...");
+    lv_obj_set_style_text_color(ecg_wait, muted, 0);
+    lv_obj_align(ecg_wait, LV_ALIGN_CENTER, 0, 8);
+
+    // ---------------- FOOTER ----------------
+
+    lv_obj_t *footer = lv_label_create(screen);
+    lv_label_set_text(footer, "Sinal: --    Sessao/tempo: 00:00");
+    lv_obj_set_style_text_color(footer, text, 0);
+    lv_obj_set_style_text_font(footer, &lv_font_montserrat_12, 0);
+    lv_obj_align(footer, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+}
+
+// --------------------------------------------------
+// LVGL INITIALIZATION
+// --------------------------------------------------
+
+static void init_lvgl()
+{
+    // Initialize LVGL task and timer.
+    const lvgl_port_cfg_t lvgl_config =
+        ESP_LVGL_PORT_INIT_CONFIG();
+
+    ESP_ERROR_CHECK(lvgl_port_init(&lvgl_config));
+
+    // Register the existing ST7789 display.
+    lvgl_port_display_cfg_t display_config = {};
+
+    display_config.io_handle = lcd_io;
+    display_config.panel_handle = lcd_panel;
+
+    display_config.buffer_size =
+        LCD_WIDTH * LVGL_BUFFER_HEIGHT;
+
+    display_config.double_buffer = true;
+
+    display_config.hres = LCD_WIDTH;
+    display_config.vres = LCD_HEIGHT;
+    display_config.monochrome = false;
+
+    display_config.color_format = LV_COLOR_FORMAT_RGB565;
+
+    display_config.rotation.swap_xy = false;
+    display_config.rotation.mirror_x = false;
+    display_config.rotation.mirror_y = false;
+
+    display_config.flags.buff_dma = true;
+    display_config.flags.swap_bytes = false;
+
+    lv_display_t *display = lvgl_port_add_disp(&display_config);
+
+    ESP_ERROR_CHECK(display != nullptr ? ESP_OK : ESP_FAIL);
+
+    // Create UI while holding LVGL's mutex.
+    if (lvgl_port_lock(0)) {
+        create_hrm_ui();
+        lvgl_port_unlock();
     }
 }
+
+// --------------------------------------------------
+// APPLICATION ENTRY POINT
+// --------------------------------------------------
 
 extern "C" void app_main()
 {
     init_backlight();
-
-    esp_lcd_panel_handle_t display = init_display();
-
-    draw_test_pattern(display);
+    init_display();
+    init_lvgl();
 }
 
 // LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!

@@ -1,4 +1,4 @@
-## IDF Component Manager Manifest File
+# IDF Component Manager Manifest File
 dependencies:
   ## Required IDF version
   idf:
@@ -15,3 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_lcd_ili9341: ^2.0.2
+  espressif/esp_lvgl_port: "^2.9.0"
