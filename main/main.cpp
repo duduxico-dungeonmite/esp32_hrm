@@ -11,6 +11,10 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_st7789.h"
 
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
 #include "esp_lvgl_port_disp.h"
@@ -23,14 +27,15 @@
 #define PIN_DC         GPIO_NUM_2
 #define PIN_BACKLIGHT  GPIO_NUM_27
 
-#define LCD_WIDTH      240
-#define LCD_HEIGHT     320
+#define LCD_WIDTH      320
+#define LCD_HEIGHT     240
 
 #define LVGL_BUFFER_HEIGHT  40
 
 // LCD handles shared with LVGL.
 static esp_lcd_panel_io_handle_t lcd_io = nullptr;
 static esp_lcd_panel_handle_t lcd_panel = nullptr;
+static lv_display_t *lvgl_display = nullptr;
 
 // --------------------------------------------------
 // BACKLIGHT
@@ -98,15 +103,18 @@ static void init_display()
     ESP_ERROR_CHECK(esp_lcd_panel_init(lcd_panel));
 
     // Common CYD display configuration.
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(lcd_panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(lcd_panel, false));
 
     // Turn display on.
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd_panel, true));
 }
 
+
+
 // --------------------------------------------------
 // HRM USER INTERFACE
 // --------------------------------------------------
+
 
 static void create_hrm_ui()
 {
@@ -115,7 +123,7 @@ static void create_hrm_ui()
     // Catppuccin-inspired palette.
     const lv_color_t bg      = lv_color_hex(0x1C1C1C);
     const lv_color_t surface = lv_color_hex(0x1E1E2E);
-    const lv_color_t purple  = lv_color_hex(0x301934);
+    const lv_color_t purple  = lv_color_hex(0xB4A0E5);
     const lv_color_t green   = lv_color_hex(0x507963);
     const lv_color_t yellow  = lv_color_hex(0xBA8E23);
     const lv_color_t text    = lv_color_hex(0xCDD6F4);
@@ -124,7 +132,7 @@ static void create_hrm_ui()
     // Main background.
     lv_obj_set_style_bg_color(screen, bg, 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(screen, 12, 0);
+    lv_obj_set_style_pad_all(screen, 8, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
 
     // ---------------- HEADER ----------------
@@ -139,19 +147,19 @@ static void create_hrm_ui()
     lv_label_set_text(status, "! SENSOR DESCONECTADO !");
     lv_obj_set_style_text_color(status, yellow, 0);
     lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
-    lv_obj_align(status, LV_ALIGN_TOP_LEFT, 0, 30);
+    lv_obj_align(status, LV_ALIGN_TOP_LEFT, 0, 26);
 
     // ---------------- BPM CARD ----------------
 
     lv_obj_t *bpm_card = lv_obj_create(screen);
-    lv_obj_set_size(bpm_card, 216, 94);
-    lv_obj_align(bpm_card, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_set_size(bpm_card, 216, 76);
+    lv_obj_align(bpm_card, LV_ALIGN_TOP_MID, 0, 48);
 
     lv_obj_set_style_bg_color(bpm_card, surface, 0);
     lv_obj_set_style_bg_opa(bpm_card, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bpm_card, 0, 0);
     lv_obj_set_style_radius(bpm_card, 12, 0);
-    lv_obj_set_style_pad_all(bpm_card, 10, 0);
+    lv_obj_set_style_pad_all(bpm_card, 8, 0);
 
     lv_obj_t *bpm_caption = lv_label_create(bpm_card);
     lv_label_set_text(bpm_caption, "Freq. Cardiaca");
@@ -161,35 +169,36 @@ static void create_hrm_ui()
     lv_obj_t *bpm_value = lv_label_create(bpm_card);
     lv_label_set_text(bpm_value, "--");
     lv_obj_set_style_text_color(bpm_value, green, 0);
-    lv_obj_set_style_text_font(bpm_value, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(bpm_value, &lv_font_montserrat_36, 0);
     lv_obj_align(bpm_value, LV_ALIGN_CENTER, -12, 8);
 
     lv_obj_t *bpm_unit = lv_label_create(bpm_card);
     lv_label_set_text(bpm_unit, "BPM");
     lv_obj_set_style_text_color(bpm_unit, text, 0);
     lv_obj_set_style_text_font(bpm_unit, &lv_font_montserrat_12, 0);
-    lv_obj_align(bpm_unit, LV_ALIGN_RIGHT_MID, -12, 12);
+    lv_obj_align(bpm_unit, LV_ALIGN_RIGHT_MID, -8, 8);
 
     // ---------------- ECG CARD ----------------
 
     lv_obj_t *ecg_card = lv_obj_create(screen);
-    lv_obj_set_size(ecg_card, 216, 105);
-    lv_obj_align(ecg_card, LV_ALIGN_TOP_MID, 0, 164);
+    lv_obj_set_size(ecg_card, 296, 72);
+    lv_obj_align(ecg_card, LV_ALIGN_TOP_MID, 0, 132);
 
     lv_obj_set_style_bg_color(ecg_card, surface, 0);
     lv_obj_set_style_bg_opa(ecg_card, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(ecg_card, 0, 0);
     lv_obj_set_style_radius(ecg_card, 12, 0);
-    lv_obj_set_style_pad_all(ecg_card, 10, 0);
+    lv_obj_set_style_pad_all(ecg_card, 8, 0);
 
     lv_obj_t *ecg_title = lv_label_create(ecg_card);
-    lv_label_set_text(ecg_title, "SINAL EGC");
+    lv_label_set_text(ecg_title, "SINAL ECG");
     lv_obj_set_style_text_color(ecg_title, purple, 0);
     lv_obj_align(ecg_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lv_obj_t *ecg_wait = lv_label_create(ecg_card);
     lv_label_set_text(ecg_wait, "Esperando sinal...");
     lv_obj_set_style_text_color(ecg_wait, muted, 0);
+    lv_obj_set_style_text_font(ecg_wait, &lv_font_montserrat_12, 0);
     lv_obj_align(ecg_wait, LV_ALIGN_CENTER, 0, 8);
 
     // ---------------- FOOTER ----------------
@@ -200,6 +209,7 @@ static void create_hrm_ui()
     lv_obj_set_style_text_font(footer, &lv_font_montserrat_12, 0);
     lv_obj_align(footer, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 }
+
 
 // --------------------------------------------------
 // LVGL INITIALIZATION
@@ -230,16 +240,14 @@ static void init_lvgl()
 
     display_config.color_format = LV_COLOR_FORMAT_RGB565;
 
-    display_config.rotation.swap_xy = false;
+    display_config.rotation.swap_xy = true;
     display_config.rotation.mirror_x = false;
-    display_config.rotation.mirror_y = false;
+    display_config.rotation.mirror_y = true;
 
     display_config.flags.buff_dma = true;
-    display_config.flags.swap_bytes = false;
+    display_config.flags.swap_bytes = true;
 
-    lv_display_t *display = lvgl_port_add_disp(&display_config);
-
-    ESP_ERROR_CHECK(display != nullptr ? ESP_OK : ESP_FAIL);
+    lvgl_display = lvgl_port_add_disp(&display_config);
 
     // Create UI while holding LVGL's mutex.
     if (lvgl_port_lock(0)) {
@@ -248,15 +256,18 @@ static void init_lvgl()
     }
 }
 
+
 // --------------------------------------------------
 // APPLICATION ENTRY POINT
 // --------------------------------------------------
+
 
 extern "C" void app_main()
 {
     init_backlight();
     init_display();
     init_lvgl();
+
 }
 
 // LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!
