@@ -2,6 +2,8 @@
 // LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!!
 
 #include <stdint.h>
+#include <stdio.h>
+#include <math.h>
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -30,12 +32,28 @@
 #define LCD_WIDTH      320
 #define LCD_HEIGHT     240
 
-#define LVGL_BUFFER_HEIGHT  40
+#define LVGL_BUFFER_HEIGHT 40
 
-// LCD handles shared with LVGL.
+// Mock ECG configuration.
+#define ECG_SAMPLE_INTERVAL_MS 20
+#define ECG_SAMPLE_RATE_HZ     50
+#define ECG_POINT_COUNT        140
+
 static esp_lcd_panel_io_handle_t lcd_io = nullptr;
 static esp_lcd_panel_handle_t lcd_panel = nullptr;
 static lv_display_t *lvgl_display = nullptr;
+
+// UI references.
+static lv_obj_t *bpm_value_label = nullptr;
+static lv_obj_t *ecg_chart = nullptr;
+static lv_obj_t *session_label = nullptr;
+
+static lv_chart_series_t *ecg_series = nullptr;
+
+// Simulation state.
+static uint32_t sample_index = 0;
+static uint32_t elapsed_seconds = 0;
+static float current_bpm = 72.0f;
 
 // --------------------------------------------------
 // BACKLIGHT
@@ -57,7 +75,6 @@ static void init_backlight()
 
 static void init_display()
 {
-    // Configure SPI bus.
     spi_bus_config_t bus_config = {};
     bus_config.sclk_io_num = PIN_SCLK;
     bus_config.mosi_io_num = PIN_MOSI;
@@ -71,7 +88,6 @@ static void init_display()
         LCD_HOST, &bus_config, SPI_DMA_CH_AUTO
     ));
 
-    // Configure LCD communication.
     esp_lcd_panel_io_spi_config_t io_config = {};
     io_config.cs_gpio_num = PIN_CS;
     io_config.dc_gpio_num = PIN_DC;
@@ -87,7 +103,6 @@ static void init_display()
         &lcd_io
     ));
 
-    // Create ST7789 panel.
     esp_lcd_panel_dev_config_t panel_config = {};
     panel_config.reset_gpio_num = GPIO_NUM_NC;
     panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
@@ -102,19 +117,103 @@ static void init_display()
     ESP_ERROR_CHECK(esp_lcd_panel_reset(lcd_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(lcd_panel));
 
-    // Common CYD display configuration.
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(lcd_panel, false));
-
-    // Turn display on.
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(lcd_panel, true));
 }
 
+// --------------------------------------------------
+// SYNTHETIC ECG GENERATOR
+// --------------------------------------------------
 
+// Gaussian-shaped ECG wave components.
+static float gaussian(float x, float center, float width)
+{
+    float distance = (x - center) / width;
+    return expf(-0.5f * distance * distance);
+}
+
+static int32_t generate_ecg_sample(float phase)
+{
+    // P wave.
+    float p = 9.0f * gaussian(phase, 0.18f, 0.035f);
+
+    // Q wave.
+    float q = -12.0f * gaussian(phase, 0.365f, 0.012f);
+
+    // R wave.
+    float r = 95.0f * gaussian(phase, 0.395f, 0.009f);
+
+    // S wave.
+    float s = -24.0f * gaussian(phase, 0.425f, 0.014f);
+
+    // T wave.
+    float t = 25.0f * gaussian(phase, 0.68f, 0.065f);
+
+    return static_cast<int32_t>(p + q + r + s + t);
+}
+
+// --------------------------------------------------
+// MOCK DATA UPDATE
+// --------------------------------------------------
+
+static void update_mock_data(lv_timer_t *timer)
+{
+    (void)timer;
+
+    const float time_seconds =
+        static_cast<float>(sample_index) /
+        ECG_SAMPLE_RATE_HZ;
+
+    // Small, smooth variation around 72 BPM.
+    current_bpm = 72.0f + 3.0f * sinf(time_seconds * 0.15f);
+
+    // Calculate position inside the current heartbeat.
+    const float beat_duration = 60.0f / current_bpm;
+
+    float beat_phase = fmodf(
+        time_seconds / beat_duration,
+        1.0f
+    );
+
+    // Generate and append the next ECG sample.
+    int32_t ecg_sample = generate_ecg_sample(beat_phase);
+
+    lv_chart_set_next_value(
+        ecg_chart,
+        ecg_series,
+        ecg_sample
+    );
+
+    // Update BPM approximately once per second.
+    if (sample_index % ECG_SAMPLE_RATE_HZ == 0)
+    {
+        char bpm_text[8];
+
+        snprintf(
+            bpm_text,
+            sizeof(bpm_text),
+            "%.0f",
+            static_cast<double>(current_bpm)
+        );
+
+        lv_label_set_text(bpm_value_label, bpm_text);
+
+        elapsed_seconds++;
+
+        lv_label_set_text_fmt(
+            session_label,
+            "DEMO | Sessao: %02lu:%02lu",
+            static_cast<unsigned long>(elapsed_seconds / 60),
+            static_cast<unsigned long>(elapsed_seconds % 60)
+        );
+    }
+
+    sample_index++;
+}
 
 // --------------------------------------------------
 // HRM USER INTERFACE
 // --------------------------------------------------
-
 
 static void create_hrm_ui()
 {
@@ -144,7 +243,7 @@ static void create_hrm_ui()
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lv_obj_t *status = lv_label_create(screen);
-    lv_label_set_text(status, "! SENSOR DESCONECTADO !");
+    lv_label_set_text(status, "MODO DEMONSTRACAO");
     lv_obj_set_style_text_color(status, yellow, 0);
     lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
     lv_obj_align(status, LV_ALIGN_TOP_LEFT, 0, 26);
@@ -152,8 +251,8 @@ static void create_hrm_ui()
     // ---------------- BPM CARD ----------------
 
     lv_obj_t *bpm_card = lv_obj_create(screen);
-    lv_obj_set_size(bpm_card, 216, 76);
-    lv_obj_align(bpm_card, LV_ALIGN_TOP_MID, 0, 48);
+    lv_obj_set_size(bpm_card, 216, 72);
+    lv_obj_align(bpm_card, LV_ALIGN_TOP_MID, 0, 46);
 
     lv_obj_set_style_bg_color(bpm_card, surface, 0);
     lv_obj_set_style_bg_opa(bpm_card, LV_OPA_COVER, 0);
@@ -166,11 +265,15 @@ static void create_hrm_ui()
     lv_obj_set_style_text_color(bpm_caption, muted, 0);
     lv_obj_align(bpm_caption, LV_ALIGN_TOP_MID, 0, 0);
 
-    lv_obj_t *bpm_value = lv_label_create(bpm_card);
-    lv_label_set_text(bpm_value, "--");
-    lv_obj_set_style_text_color(bpm_value, green, 0);
-    lv_obj_set_style_text_font(bpm_value, &lv_font_montserrat_36, 0);
-    lv_obj_align(bpm_value, LV_ALIGN_CENTER, -12, 8);
+    bpm_value_label = lv_label_create(bpm_card);
+    lv_label_set_text(bpm_value_label, "72");
+    lv_obj_set_style_text_color(bpm_value_label, green, 0);
+    lv_obj_set_style_text_font(
+        bpm_value_label,
+        &lv_font_montserrat_36,
+        0
+    );
+    lv_obj_align(bpm_value_label, LV_ALIGN_CENTER, -12, 8);
 
     lv_obj_t *bpm_unit = lv_label_create(bpm_card);
     lv_label_set_text(bpm_unit, "BPM");
@@ -181,35 +284,98 @@ static void create_hrm_ui()
     // ---------------- ECG CARD ----------------
 
     lv_obj_t *ecg_card = lv_obj_create(screen);
-    lv_obj_set_size(ecg_card, 296, 72);
-    lv_obj_align(ecg_card, LV_ALIGN_TOP_MID, 0, 132);
+    lv_obj_set_size(ecg_card, 296, 86);
+    lv_obj_align(ecg_card, LV_ALIGN_TOP_MID, 0, 126);
 
     lv_obj_set_style_bg_color(ecg_card, surface, 0);
     lv_obj_set_style_bg_opa(ecg_card, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(ecg_card, 0, 0);
     lv_obj_set_style_radius(ecg_card, 12, 0);
-    lv_obj_set_style_pad_all(ecg_card, 8, 0);
+    lv_obj_set_style_pad_all(ecg_card, 6, 0);
 
     lv_obj_t *ecg_title = lv_label_create(ecg_card);
-    lv_label_set_text(ecg_title, "SINAL ECG");
+    lv_label_set_text(ecg_title, "SINAL ECG - SIMULADO");
     lv_obj_set_style_text_color(ecg_title, purple, 0);
+    lv_obj_set_style_text_font(ecg_title, &lv_font_montserrat_12, 0);
     lv_obj_align(ecg_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lv_obj_t *ecg_wait = lv_label_create(ecg_card);
-    lv_label_set_text(ecg_wait, "Esperando sinal...");
-    lv_obj_set_style_text_color(ecg_wait, muted, 0);
-    lv_obj_set_style_text_font(ecg_wait, &lv_font_montserrat_12, 0);
-    lv_obj_align(ecg_wait, LV_ALIGN_CENTER, 0, 8);
+    // ECG chart.
+    ecg_chart = lv_chart_create(ecg_card);
+
+    lv_obj_set_size(ecg_chart, 278, 52);
+    lv_obj_align(ecg_chart, LV_ALIGN_BOTTOM_MID, 0, -1);
+
+    lv_chart_set_type(ecg_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(ecg_chart, ECG_POINT_COUNT);
+
+    lv_chart_set_range(
+        ecg_chart,
+        LV_CHART_AXIS_PRIMARY_Y,
+        -35,
+        110
+    );
+
+    lv_chart_set_update_mode(
+        ecg_chart,
+        LV_CHART_UPDATE_MODE_SHIFT
+    );
+
+    lv_chart_set_div_line_count(ecg_chart, 0, 0);
+
+    // Remove chart background and border.
+    lv_obj_set_style_bg_opa(ecg_chart, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ecg_chart, 0, 0);
+    lv_obj_set_style_pad_all(ecg_chart, 0, 0);
+
+    // ECG waveform series.
+    ecg_series = lv_chart_add_series(
+        ecg_chart,
+        green,
+        LV_CHART_AXIS_PRIMARY_Y
+    );
+
+    lv_obj_set_style_line_width(
+        ecg_chart,
+        2,
+        LV_PART_ITEMS
+    );
+
+    lv_obj_set_style_size(
+        ecg_chart,
+        0,
+        0,
+        LV_PART_INDICATOR
+    );
+
+    // Initialize chart with baseline values.
+    for (int i = 0; i < ECG_POINT_COUNT; i++)
+    {
+        lv_chart_set_next_value(
+            ecg_chart,
+            ecg_series,
+            0
+        );
+    }
 
     // ---------------- FOOTER ----------------
 
-    lv_obj_t *footer = lv_label_create(screen);
-    lv_label_set_text(footer, "Sinal: --    Sessao/tempo: 00:00");
-    lv_obj_set_style_text_color(footer, text, 0);
-    lv_obj_set_style_text_font(footer, &lv_font_montserrat_12, 0);
-    lv_obj_align(footer, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-}
+    session_label = lv_label_create(screen);
+    lv_label_set_text(session_label, "DEMO | Sessao: 00:00");
+    lv_obj_set_style_text_color(session_label, text, 0);
+    lv_obj_set_style_text_font(
+        session_label,
+        &lv_font_montserrat_12,
+        0
+    );
+    lv_obj_align(session_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
+    // Start simulated data generation.
+    lv_timer_create(
+        update_mock_data,
+        ECG_SAMPLE_INTERVAL_MS,
+        nullptr
+    );
+}
 
 // --------------------------------------------------
 // LVGL INITIALIZATION
@@ -217,13 +383,11 @@ static void create_hrm_ui()
 
 static void init_lvgl()
 {
-    // Initialize LVGL task and timer.
     const lvgl_port_cfg_t lvgl_config =
         ESP_LVGL_PORT_INIT_CONFIG();
 
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_config));
 
-    // Register the existing ST7789 display.
     lvgl_port_display_cfg_t display_config = {};
 
     display_config.io_handle = lcd_io;
@@ -249,25 +413,22 @@ static void init_lvgl()
 
     lvgl_display = lvgl_port_add_disp(&display_config);
 
-    // Create UI while holding LVGL's mutex.
-    if (lvgl_port_lock(0)) {
+    if (lvgl_port_lock(0))
+    {
         create_hrm_ui();
         lvgl_port_unlock();
     }
 }
 
-
 // --------------------------------------------------
 // APPLICATION ENTRY POINT
 // --------------------------------------------------
-
 
 extern "C" void app_main()
 {
     init_backlight();
     init_display();
     init_lvgl();
-
 }
 
-// LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!
+// LEMBRAR DE FAZER git pull QUANDO EDITAR O PROJETO NA ESCOLA PRA SINCRONIZAR EM CASA!!!
